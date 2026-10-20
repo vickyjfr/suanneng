@@ -1,0 +1,27 @@
+name: se9_mobile
+description: SE9 mobile file management demo.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  file_picker: ^8.0.0
+  cryptography: ^2.7.0
+  shared_preferences: ^2.5.3
+  image_picker: ^1.2.0
+  flutter_webrtc: 1.6.2+hotfix.4
+  path_provider: ^2.1.5
+  flutter_secure_storage: ^9.2.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true

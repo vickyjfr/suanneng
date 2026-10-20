@@ -1,0 +1,11 @@
+/var/log/se9/*.log /var/log/se9/*.error.log {
+    daily
+    rotate 14
+    size 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    create 0640 se9 se9
+}

@@ -1,0 +1,34 @@
+[Unit]
+Description=SE9 Demo File API
+After=network-online.target
+Wants=network-online.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/se9
+EnvironmentFile=-/etc/se9/se9-file-api.env
+ExecStart=/opt/se9/se9_file_api
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=5
+User=se9
+Group=se9
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/vos/workspace/demo /var/lib/se9 /var/log/se9
+LogsDirectory=se9
+StandardOutput=append:/var/log/se9/file-api.log
+StandardError=append:/var/log/se9/file-api.error.log

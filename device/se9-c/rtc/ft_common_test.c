@@ -1,0 +1,5 @@
+#include "ft_common.h"
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+int main(void){unsigned char wire[SE9_FT_FRAME],payload[]={1,2,3};const char *id="0123456789abcdef0123456789abcdef";size_t n=ft_frame_write(wire,sizeof(wire),id,2,7,((uint64_t)1<<33),payload,3);assert(n==51);char actual[33];uint32_t epoch,sequence;uint64_t offset;const unsigned char *out;size_t size;assert(ft_frame_read(wire,n,actual,&epoch,&sequence,&offset,&out,&size));assert(strcmp(id,actual)==0&&epoch==2&&sequence==7&&offset==((uint64_t)1<<33)&&size==3&&memcmp(out,payload,3)==0);wire[44]=1;assert(!ft_frame_read(wire,n,actual,&epoch,&sequence,&offset,&out,&size));assert(ft_frame_write(wire,sizeof(wire),id,1,1,SE9_FT_BLOCK-1,payload,3)==0);char hash[65];assert(ft_sha256("",0,hash));assert(strcmp(hash,"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")==0);char *encoded=ft_base64(payload,3,true);size_t len;unsigned char *decoded=ft_decode64(encoded,&len,true);assert(len==3&&memcmp(decoded,payload,3)==0);free(decoded);free(encoded);return 0;}

@@ -1,0 +1,34 @@
+[CLOUD] path=/api/v2/devices/register status=0 bytes=0
+[UDP] received type=discover_request requestId=1792459332479483 peer=192.168.1.127:59313
+[UDP] received type=handshake_request requestId=1792459342440403 peer=192.168.1.127:63777
+[UDP] handshake accepted requestId=1792459342440403
+[UDP] received type=pairing_request requestId=1792459342440403-pair peer=192.168.1.127:63777
+[UDP] pairing accepted requestId=1792459342440403-pair
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/claim/prepare status=0 bytes=0
+claim preparation failed
+[UDP] received type=handshake_request requestId=1792459352294198 peer=192.168.1.127:52011
+[UDP] handshake accepted requestId=1792459352294198
+[UDP] received type=pairing_request requestId=1792459352294198-pair peer=192.168.1.127:52011
+[UDP] pairing accepted requestId=1792459352294198-pair
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/claim/prepare status=0 bytes=0
+claim preparation failed
+[CLOUD] path=/api/v2/devices/register status=201 bytes=631
+[UDP] received type=handshake_request requestId=8db78d1e904d576285f43f6cafb74ec5 peer=127.0.0.1:49261
+[UDP] handshake accepted requestId=8db78d1e904d576285f43f6cafb74ec5
+[UDP] received type=pairing_request requestId=7ef473a95f5164229e826b07dadabd83 peer=127.0.0.1:49261
+[UDP] pairing accepted requestId=7ef473a95f5164229e826b07dadabd83
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/claim/prepare status=200 bytes=424
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/heartbeat status=200 bytes=527
+[UDP] received type=handshake_request requestId=1792459495373239 peer=192.168.1.127:64505
+[UDP] handshake accepted requestId=1792459495373239
+[UDP] received type=pairing_request requestId=1792459495373239-pair peer=192.168.1.127:64505
+[UDP] pairing accepted requestId=1792459495373239-pair
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/claim/prepare status=200 bytes=413
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/heartbeat status=200 bytes=520
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/heartbeat status=200 bytes=521
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/heartbeat status=200 bytes=521
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/heartbeat status=200 bytes=521
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/heartbeat status=200 bytes=521
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/heartbeat status=0 bytes=0
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/heartbeat status=200 bytes=521
+[CLOUD] path=/api/v2/devices/254ebf589737390485d71b6e698ff7b6/heartbeat status=200 bytes=521
