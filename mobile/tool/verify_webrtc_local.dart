@@ -6,6 +6,16 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
 
+class LoopbackCertificateOverride extends HttpOverrides {
+  LoopbackCertificateOverride(this.expectedDer);
+  final String expectedDer;
+  @override
+  HttpClient createHttpClient(SecurityContext? context) =>
+      super.createHttpClient(context)
+        ..badCertificateCallback = (certificate, host, port) =>
+            host == '127.0.0.1' && base64Encode(certificate.der) == expectedDer;
+}
+
 void check(bool condition, String message) {
   if (!condition) throw StateError(message);
 }
@@ -18,9 +28,10 @@ Future<int> freePort() async {
 }
 
 Future<void> main(List<String> args) async {
-  if (args.length != 4)
+  if (args.length != 4) {
     throw ArgumentError(
         'cloud-binary agent-binary file-api-binary rtc-probe-binary');
+  }
   final directory = await Directory.systemTemp.createTemp('se9-local-check-');
   final processes = <Process>[];
   final logs = <IOSink>[];
@@ -29,7 +40,9 @@ Future<void> main(List<String> args) async {
   final packets = StreamController<Map<String, dynamic>>.broadcast();
   final cloudPort = await freePort();
   final apiPort = await freePort();
-  final cloud = 'http://127.0.0.1:$cloudPort';
+  final tls = Platform.environment['SE9_TEST_TLS'] == '1';
+  final autoConfig = Platform.environment['SE9_TEST_AUTOCONFIG'] == '1';
+  final cloud = '${tls ? 'https' : 'http'}://127.0.0.1:$cloudPort';
   final files = 'http://127.0.0.1:$apiPort';
   const proxyToken = 'local-test-proxy-token';
   Future<void> start(
@@ -47,8 +60,14 @@ Future<void> main(List<String> args) async {
       try {
         if ((await http.get(Uri.parse(url)).timeout(const Duration(seconds: 1)))
                 .statusCode ==
-            200) return;
-      } catch (_) {}
+            200) {
+          return;
+        }
+      } catch (error) {
+        if (attempt == 79) {
+          stderr.writeln('Service readiness error: $error');
+        }
+      }
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     throw StateError('service not ready: $url');
@@ -63,13 +82,47 @@ Future<void> main(List<String> args) async {
   }
 
   try {
+    if (tls) {
+      final certificate = await Process.run('openssl', [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-days',
+        '1',
+        '-subj',
+        '/CN=se9-local-test',
+        '-addext',
+        'subjectAltName=IP:127.0.0.1',
+        '-keyout',
+        '${directory.path}/tls.key',
+        '-out',
+        '${directory.path}/tls.crt'
+      ]);
+      check(certificate.exitCode == 0, 'test IP certificate generation failed');
+      SecurityContext.defaultContext
+          .setTrustedCertificates('${directory.path}/tls.crt');
+      final pem = await File('${directory.path}/tls.crt').readAsLines();
+      HttpOverrides.global = LoopbackCertificateOverride(
+          pem.where((line) => !line.startsWith('-----')).join());
+    }
     await start(
         args[0],
         {
           'RTC_ENABLED': '1',
-          'RTC_ALLOW_INSECURE_LOCAL': '1',
+          if (Platform.environment['SE9_TEST_TURN'] == '1')
+            'TURN_URLS': Platform.environment['SE9_TEST_TURN_URL'] ??
+                'turn:127.0.0.1:34789?transport=udp',
+          if (Platform.environment['SE9_TEST_TURN'] == '1')
+            'TURN_SHARED_SECRET_FILE':
+                Platform.environment['SE9_TEST_TURN_SECRET']!,
+          'RTC_ALLOW_INSECURE_LOCAL': tls ? '0' : '1',
+          if (tls) 'TLS_CERT_FILE': '${directory.path}/tls.crt',
+          if (tls) 'TLS_KEY_FILE': '${directory.path}/tls.key',
           'RTC_GRANT_KEY_FILE': '${directory.path}/grant.pem',
           'PORT': '$cloudPort',
+          'LISTEN_ADDR': '127.0.0.1:$cloudPort',
           'AUTH_STATE_FILE': '${directory.path}/refresh.json',
           'CLOUD_STATE_FILE': '${directory.path}/state.json',
           'DEMO_ADMIN_PASSWORD': 'test-password'
@@ -81,7 +134,8 @@ Future<void> main(List<String> args) async {
           'FILE_API_BIND_ADDR': '127.0.0.1',
           'FILE_API_PORT': '$apiPort',
           'STORAGE_ROOT': '${directory.path}/storage',
-          'SE9_AGENT_PROXY_TOKEN': proxyToken,
+          if (!autoConfig) 'SE9_AGENT_PROXY_TOKEN': proxyToken,
+          'SE9_AGENT_PROXY_TOKEN_FILE': '${directory.path}/proxy-key',
           'DEMO_ADMIN_PASSWORD': 'test-password'
         },
         'file-api');
@@ -99,15 +153,17 @@ Future<void> main(List<String> args) async {
     await start(
         args[1],
         {
-          'SE9_RTC_ENABLED': '1',
-          'SE9_RTC_ALLOW_INSECURE_LOCAL': '1',
+          if (!autoConfig) 'SE9_RTC_ENABLED': '1',
+          'SE9_RTC_ALLOW_INSECURE_LOCAL': tls ? '0' : '1',
+          if (tls) 'SE9_CA_FILE': '${directory.path}/tls.crt',
           'SE9_CLOUD_GRANT_PUBLIC_KEY': '${directory.path}/grant-public.pem',
           'FILE_API_PORT': '$apiPort',
           'SE9_KEY_FILE': '${directory.path}/device.pem',
           'SE9_TOKEN_FILE': '${directory.path}/device-token',
           'SE9_CLOUD_URL': cloud,
           'SE9_CLOUD_BASE_PATH': '',
-          'SE9_AGENT_PROXY_TOKEN': proxyToken
+          if (!autoConfig) 'SE9_AGENT_PROXY_TOKEN': proxyToken,
+          'SE9_AGENT_PROXY_TOKEN_FILE': '${directory.path}/proxy-key'
         },
         'agent');
     final tokenFile = File('${directory.path}/device-token');
@@ -239,11 +295,15 @@ Future<void> main(List<String> args) async {
       final list = data(
           await http.get(Uri.parse('$cloud/api/v2/device_list'), headers: auth),
           200);
-      if ((list['items'][0]['capabilities'] as Map?)?['transports'] != null)
+      if ((list['items'][0]['capabilities']
+              as Map?)?['fileTransferTransports'] !=
+          null) {
         break;
+      }
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     await verifyRtc(cloud, auth, device, args[3]);
+    if (Platform.environment['SE9_TEST_SKIP_LEGACY'] == '1') return;
     final localLogin = data(
         await http.post(Uri.parse('$files/api/v2/auth/login'),
             body:
@@ -263,7 +323,7 @@ Future<void> main(List<String> args) async {
               headers: auth, body: jsonEncode({'deviceId': selectedDevice})),
           201);
       final ws = await WebSocket.connect(
-          'ws://127.0.0.1:$cloudPort/api/v2/relay/app?sessionId=${session['sessionId']}',
+          '${tls ? 'wss' : 'ws'}://127.0.0.1:$cloudPort/api/v2/relay/app?sessionId=${session['sessionId']}',
           headers: auth);
       try {
         final pending = ws.first.timeout(const Duration(seconds: 25));

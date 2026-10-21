@@ -16,6 +16,7 @@ class FileTransferTask {
       this.size = 0,
       this.hash = '',
       this.state = 'preparing',
+      this.phase = '',
       this.transport = '',
       this.error = '',
       this.remoteId = '',
@@ -26,9 +27,10 @@ class FileTransferTask {
       : blocks = blocks ?? {};
   final String id, userId, deviceId, direction, path, localPath;
   int size, epoch, durableBytes;
-  String hash, state, transport, error, remoteId, sourceVersion;
+  String hash, state, phase, transport, error, remoteId, sourceVersion;
   final Map<int, String> blocks;
-  bool get terminal => const {'completed', 'cancelled'}.contains(state);
+  bool get terminal =>
+      const {'completed', 'cancelled', 'failed'}.contains(state);
   double get progress => size == 0
       ? (state == 'completed' ? 1 : 0)
       : (durableBytes / size).clamp(0, 1);
@@ -43,6 +45,7 @@ class FileTransferTask {
         'size': '$size',
         'sha256': hash,
         'state': state,
+        'phase': phase,
         'transport': transport,
         'error': error,
         'remoteId': remoteId,
@@ -61,6 +64,7 @@ class FileTransferTask {
       size: transferInt(j['size']),
       hash: j['sha256'] as String,
       state: j['state'] as String,
+      phase: j['phase'] as String? ?? '',
       transport: j['transport'] as String? ?? '',
       error: j['error'] as String? ?? '',
       remoteId: j['remoteId'] as String? ?? '',
@@ -78,6 +82,7 @@ class FileTransferTask {
         'sourceVersion': sourceVersion,
         'direction': direction,
         'state': state,
+        'phase': phase,
         'blockBytes': '$ftBlockBytes'
       });
 }

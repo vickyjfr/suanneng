@@ -1,0 +1,4 @@
+#ifndef SE9_CLOUD_GRANT_KEY_H
+#define SE9_CLOUD_GRANT_KEY_H
+static const char se9_cloud_grant_public_pem[] = "@SE9_CLOUD_GRANT_PEM_ESCAPED@";
+#endif

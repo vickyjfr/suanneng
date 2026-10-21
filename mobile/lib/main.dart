@@ -14,6 +14,9 @@ import 'transfer/rtc_session.dart';
 import 'transfer/transfer_manager.dart';
 import 'transfer/transfer_repository.dart';
 import 'transfer/file_export.dart';
+import 'network/logging_http_client.dart';
+
+part 'add_device_page.dart';
 
 void main() => runApp(const Se9App());
 
@@ -31,8 +34,8 @@ class Se9Api {
   Se9Api(this.baseUrl, {String? cloudUrl, http.Client? client})
       : cloudBaseUrl = cloudUrl ??
             const String.fromEnvironment('SE9_CLOUD_API',
-                defaultValue: 'http://123.56.147.51/se9'),
-        _client = client ?? http.Client();
+                defaultValue: 'https://123.56.147.51:8443/se9'),
+        _client = LoggingHttpClient(client ?? http.Client());
   final Set<String> _rtcDevices = {};
   TransferManager? _transfers;
   Future<TransferManager>? _transferFlight;
@@ -70,9 +73,15 @@ class Se9Api {
               }
               return (envelope['data'] as Map).cast<String, dynamic>();
             }),
+        forceRelay: const bool.fromEnvironment('SE9_RTC_FORCE_RELAY'),
+        allowLegacyRelay: const bool.fromEnvironment(
+            'SE9_RTC_ALLOW_LEGACY_RELAY',
+            defaultValue: true),
         userId: account['userId']!,
         repository: repository,
-        onUpdate: (task) => onTransferChanged?.call(task));
+        onUpdate: (task) {
+          if (generation == _sessionGeneration) onTransferChanged?.call(task);
+        });
     await manager.initialize();
     if (generation != _sessionGeneration) {
       throw const TransferException('RTC_AUTH_FAILED');
@@ -104,7 +113,7 @@ class Se9Api {
     token = null;
     if (baseUrl.isNotEmpty) {
       try {
-        final response = await http.post(
+        final response = await _client.post(
             Uri.parse('$baseUrl/api/v2/auth/login'),
             headers: {'content-type': 'application/json'},
             body: jsonEncode({'username': username, 'password': password}));
@@ -188,23 +197,34 @@ class Se9Api {
 
   Future<http.Response> _cloudRequest(String method, String path,
       {Map<String, dynamic>? body}) async {
-    await refreshIfNeeded();
-    Future<http.Response> send() {
-      final uri = Uri.parse('$cloudBaseUrl$path');
-      final headers = {'content-type': 'application/json', ..._cloudHeaders};
-      return (method == 'GET'
-              ? _client.get(uri, headers: headers)
-              : method == 'DELETE'
-                  ? _client.delete(uri, headers: headers)
-                  : _client.post(uri,
-                      headers: headers, body: jsonEncode(body ?? {})))
-          .timeout(const Duration(seconds: 15));
-    }
+    try {
+      await refreshIfNeeded();
+      Future<http.Response> send() {
+        final uri = Uri.parse('$cloudBaseUrl$path');
+        final headers = {'content-type': 'application/json', ..._cloudHeaders};
+        return (method == 'GET'
+                ? _client.get(uri, headers: headers)
+                : method == 'DELETE'
+                    ? _client.delete(uri, headers: headers)
+                    : _client.post(uri,
+                        headers: headers, body: jsonEncode(body ?? {})))
+            .timeout(const Duration(seconds: 15));
+      }
 
-    final response = await send();
-    if (response.statusCode != 401) return response;
-    await refreshCloudToken();
-    return send();
+      final response = await send();
+      if (response.statusCode != 401) return response;
+      debugPrint(
+          '[SE9-API] $method $path returned 401; refreshing credentials and retrying');
+      await refreshCloudToken();
+      return await send();
+    } catch (error, stack) {
+      debugPrint(
+          '[SE9-API] $method $path failed (${error.runtimeType}): $error');
+      if (kDebugMode) {
+        debugPrintStack(stackTrace: stack, label: '[SE9-API] request failure');
+      }
+      rethrow;
+    }
   }
 
   Future<void> ensureLocalSession() async {
@@ -224,7 +244,8 @@ class Se9Api {
     if (refreshToken == null || baseUrl.isEmpty) {
       throw Exception('local refresh token missing');
     }
-    final response = await http.post(Uri.parse('$baseUrl/api/v2/auth/refresh'),
+    final response = await _client.post(
+        Uri.parse('$baseUrl/api/v2/auth/refresh'),
         headers: {'content-type': 'application/json'},
         body: jsonEncode({'refreshToken': refreshToken}));
     final data = _data(response, 200, '设备登录状态已失效');
@@ -322,6 +343,7 @@ class Se9Api {
     while (true) {
       final response = await _cloudRequest(
           'GET', '/api/v2/device_list?page=$page&pageSize=100');
+      debugPrint('[SE9-DEVICES] page=$page HTTP ${response.statusCode}');
       final data = _data(response, 200, '读取设备列表失败');
       final items = (data['items'] as List)
           .map((item) =>
@@ -332,6 +354,8 @@ class Se9Api {
         _rtcDevices
           ..clear()
           ..addAll(devices.where((d) => d.supportsRtc).map((d) => d.deviceId));
+        debugPrint(
+            '[SE9-DEVICES] loaded ${devices.length} devices, WebRTC=${_rtcDevices.length}');
         return devices;
       }
       page++;
@@ -347,7 +371,7 @@ class Se9Api {
 
   Future<void> resetPassword(
       String account, String resetCode, String newPassword) async {
-    final response = await http.post(
+    final response = await _client.post(
         Uri.parse('$cloudBaseUrl/api/v2/auth/password/reset'),
         headers: {'content-type': 'application/json'},
         body: jsonEncode({
@@ -370,7 +394,7 @@ class Se9Api {
 
   Future<List<Map<String, dynamic>>> list(String path) async {
     await ensureLocalSession();
-    final response = await http.get(
+    final response = await _client.get(
         Uri.parse(
             '$baseUrl/api/v2/files?path=${Uri.encodeQueryComponent(path)}'),
         headers: _headers);
@@ -380,7 +404,7 @@ class Se9Api {
 
   Future<List<int>> download(String path) async {
     await ensureLocalSession();
-    final response = await http.get(
+    final response = await _client.get(
         Uri.parse('$baseUrl/api/v2/files/${Uri.encodeComponent(path)}'),
         headers: _headers);
     if (response.statusCode != 200) throw Exception('下载失败');
@@ -389,7 +413,7 @@ class Se9Api {
 
   Future<void> delete(String path) async {
     await ensureLocalSession();
-    final response = await http.delete(
+    final response = await _client.delete(
         Uri.parse('$baseUrl/api/v2/files/${Uri.encodeComponent(path)}'),
         headers: _headers);
     _data(response, 200, '删除失败');
@@ -397,7 +421,7 @@ class Se9Api {
 
   Future<void> rename(String path, String destination) async {
     await ensureLocalSession();
-    final response = await http.patch(
+    final response = await _client.patch(
         Uri.parse('$baseUrl/api/v2/files/${Uri.encodeComponent(path)}'),
         headers: {..._headers, 'content-type': 'application/json'},
         body: jsonEncode({'path': destination}));
@@ -410,7 +434,8 @@ class Se9Api {
     final bytes = file.bytes ?? await File(file.path!).readAsBytes();
     const chunkSize = 8 * 1024 * 1024;
     final destination = path.isEmpty ? file.name : '$path/${file.name}';
-    final create = await http.post(Uri.parse('$baseUrl/api/v2/upload/sessions'),
+    final create = await _client.post(
+        Uri.parse('$baseUrl/api/v2/upload/sessions'),
         headers: {..._headers, 'content-type': 'application/json'},
         body: jsonEncode({
           'path': destination,
@@ -424,14 +449,14 @@ class Se9Api {
       final start = i * chunkSize;
       final end =
           (start + chunkSize > bytes.length) ? bytes.length : start + chunkSize;
-      final response = await http.put(
+      final response = await _client.put(
           Uri.parse('$baseUrl/api/v2/upload/$uploadId/chunks/$i'),
           headers: _headers,
           body: bytes.sublist(start, end));
       _data(response, 200, '上传分片失败');
       progress((i + 1) / total);
     }
-    final complete = await http.post(
+    final complete = await _client.post(
         Uri.parse('$baseUrl/api/v2/upload/$uploadId/complete'),
         headers: _headers);
     _data(complete, 200, '合并文件失败');
@@ -982,9 +1007,10 @@ class BoundDevice {
         name: json['name'] as String? ?? 'SE9 NAS',
         status: json['status'] as String? ?? 'offline',
         lastSeen: DateTime.tryParse(json['lastSeen'] as String? ?? ''),
-        supportsRtc:
-            ((json['capabilities'] as Map?)?['transports'] as List? ?? [])
-                .contains('webrtc'),
+        supportsRtc: ((json['capabilities'] as Map?)?['fileTransferTransports']
+                    as List? ??
+                [])
+            .contains('webrtc'),
       );
   final String deviceId;
   final String name;
@@ -995,8 +1021,10 @@ class BoundDevice {
 }
 
 class FilePage extends StatefulWidget {
-  const FilePage({super.key, this.api});
+  const FilePage({super.key, this.api, this.imagePicker, this.discovery});
   final Se9Api? api;
+  final ImagePicker? imagePicker;
+  final UdpDiscovery? discovery;
   @override
   State<FilePage> createState() => _FilePageState();
 }
@@ -1009,18 +1037,21 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
   double? progress;
   String message = '未登录';
   FileTransferTask? currentTransfer;
-  final discovery = UdpDiscovery();
-  List<DiscoveredDevice> devices = [];
-  bool discovering = false;
+  String? transferName;
+  String transferTransport = '';
+  String transferState = '';
+  String transferDirection = '';
   BoundDevice? activeRemoteDevice;
   List<BoundDevice> boundDevices = [];
   bool loadingDevices = false;
   bool loadingFiles = false;
   bool downloading = false;
+  bool selectingFiles = false;
   String? deviceListError;
   int deviceListRequest = 0;
   int fileRequest = 0;
-  bool get busy => progress != null || loadingFiles || downloading;
+  bool get busy =>
+      selectingFiles || progress != null || loadingFiles || downloading;
   bool get canUseFiles =>
       !busy && (activeRemoteDevice?.online ?? (api.token != null));
   String searchQuery = '';
@@ -1073,9 +1104,15 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
       loadingDevices = true;
       deviceListError = null;
     });
+    var stage = 'device_list';
     try {
+      debugPrint('[SE9-DEVICES] loading from ${api.cloudBaseUrl}');
       final result = await api.deviceList();
-      if (result.any((d) => d.supportsRtc)) await api.transferManager();
+      stage = 'transfer initialization';
+      if (result.any((d) => d.supportsRtc)) {
+        debugPrint('[SE9-DEVICES] initializing transfer tasks');
+        await api.transferManager();
+      }
       if (!mounted || request != deviceListRequest) return;
       setState(() {
         boundDevices = result;
@@ -1090,7 +1127,11 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
           }
         }
       });
-    } catch (e) {
+    } catch (e, stack) {
+      debugPrint('[SE9-DEVICES] failed at $stage (${e.runtimeType}): $e');
+      if (kDebugMode) {
+        debugPrintStack(stackTrace: stack, label: '[SE9-DEVICES] load failure');
+      }
       if (mounted && request == deviceListRequest) {
         setState(() => deviceListError = '$e');
       }
@@ -1122,6 +1163,8 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
       loadingDevices = false;
       loadingFiles = false;
       deviceListError = null;
+      currentTransfer = null;
+      transferName = null;
     });
     try {
       await api.logout();
@@ -1129,81 +1172,27 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
     if (mounted) setState(() => message = '已退出登录');
   }
 
-  Future<bool> configureDeviceUrl() async {
-    final controller = TextEditingController(
-        text: api.baseUrl.isEmpty ? 'http://192.168.1.50:8443' : api.baseUrl);
-    final value = await showDialog<String>(
-        context: context,
-        builder: (context) => AlertDialog(
-                title: const Text('连接设备'),
-                content: TextField(
-                    controller: controller,
-                    autofocus: true,
-                    keyboardType: TextInputType.url,
-                    decoration: const InputDecoration(
-                        labelText: '设备地址',
-                        hintText: 'http://192.168.1.50:8443')),
-                actions: [
-                  IconButton(
-                      tooltip: '传输任务',
-                      onPressed:
-                          api.cloudToken == null ? null : showTransferTasks,
-                      icon: const Icon(Icons.swap_vert)),
-                  TextButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text('取消')),
-                  FilledButton(
-                      onPressed: () =>
-                          Navigator.pop(context, controller.text.trim()),
-                      child: const Text('连接'))
-                ]));
-    if (value == null || value.isEmpty) return false;
-    final uri = Uri.tryParse(value);
-    if (uri == null ||
-        uri.host.isEmpty ||
-        (uri.scheme != 'http' && uri.scheme != 'https')) {
-      if (mounted) setState(() => message = '设备地址格式错误');
-      return false;
-    }
-    api.baseUrl = value.replaceFirst(RegExp(r'/$'), '');
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setString('se9.device.baseUrl', api.baseUrl);
-    return true;
+  Future<void> addDevice() async {
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => AddDevicePage(
+            api: api,
+            discovery: widget.discovery,
+            boundIds: boundDevices.map((d) => d.deviceId).toSet())));
+    if (mounted) await loadBoundDevices();
   }
 
-  Future<void> discoverDevices() async {
-    setState(() => discovering = true);
-    try {
-      final result = await discovery.discover();
-      if (mounted) {
-        setState(() {
-          devices = result;
-          message = result.isEmpty ? '未发现设备' : '发现 ${result.length} 台设备';
-        });
-      }
-    } catch (e) {
-      if (mounted) setState(() => message = '设备发现失败: $e');
-    } finally {
-      if (mounted) setState(() => discovering = false);
-    }
-  }
-
-  Future<void> pairDevice(DiscoveredDevice device) async {
-    try {
-      api.baseUrl = 'http://${device.address.address}:${device.port}';
-      final claim = await discovery.pair(device);
-      if (claim == null) {
-        if (mounted) setState(() => message = '绑定交换失败');
-        return;
-      }
-      await api.confirmClaim(device.deviceId, claim.claimString,
-          claimRequestId: claim.requestId);
-      if (!mounted) return;
-      setState(() => message = '设备绑定成功');
-      await loadBoundDevices();
-    } catch (e) {
-      if (mounted) setState(() => message = '绑定交换失败: $e');
-    }
+  void beginTransfer(String name, BoundDevice? device, String direction) {
+    setState(() {
+      currentTransfer = null;
+      transferName = name;
+      transferDirection = direction;
+      transferTransport = device == null
+          ? '本地直连（HTTP）'
+          : api.supportsRtc(device.deviceId)
+              ? ''
+              : '服务器转发';
+      transferState = 'preparing';
+    });
   }
 
   Future<Map<String, String>?> promptCredentials(
@@ -1290,7 +1279,7 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
         pathController.text.isEmpty ? name : '${pathController.text}/$name';
     try {
       if (activeRemoteDevice == null) {
-        final response = await http.post(
+        final response = await api._client.post(
             Uri.parse('${api.baseUrl}/api/v2/folders'),
             headers: {...api.headers, 'content-type': 'application/json'},
             body: jsonEncode({'path': folderPath}));
@@ -1314,6 +1303,7 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
     setState(() => downloading = true);
     final path = file['path'] as String? ?? '';
     final name = file['name'] as String? ?? 'download.bin';
+    beginTransfer(name, activeRemoteDevice, 'download');
     try {
       String? saved;
       final device = activeRemoteDevice;
@@ -1330,10 +1320,18 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
             .saveFile(fileName: name, bytes: Uint8List.fromList(bytes));
       }
       if (mounted) {
-        setState(() => message = saved == null ? '已取消保存' : '已保存 $name');
+        setState(() {
+          transferState = 'completed';
+          message = saved == null ? '已取消保存' : '已保存 $name';
+        });
       }
     } catch (e) {
-      if (mounted) setState(() => message = '下载失败: $e');
+      if (mounted) {
+        setState(() {
+          transferState = 'failed';
+          message = '下载失败: $e';
+        });
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -1427,37 +1425,82 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> pickAndRemoteUpload(BoundDevice device) async {
-    if (busy || !device.online) return;
-    final source = await showModalBottomSheet<String>(
-      context: context,
-      builder: (context) => SafeArea(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-        ListTile(title: Text('上传到 ${device.name}')),
-        ListTile(
-            leading: const Icon(Icons.photo_library),
-            title: const Text('从相册选择图片'),
-            onTap: () => Navigator.pop(context, 'images')),
-        ListTile(
-            leading: const Icon(Icons.video_library),
-            title: const Text('从相册选择视频'),
-            onTap: () => Navigator.pop(context, 'video')),
-        ListTile(
-            leading: const Icon(Icons.insert_drive_file),
-            title: const Text('选择文件'),
-            onTap: () => Navigator.pop(context, 'files')),
-      ])),
-    );
-    if (source == null || !mounted) return;
-    setState(() => selectRemoteDevice(device));
-    if (source != 'files') {
-      await pickFromGallery(source: source, remoteDevice: device);
-      return;
+  Future<void> pickAndRemoteUpload(BoundDevice device) =>
+      selectAndUpload(remoteDevice: device, includeFiles: true);
+
+  Future<void> selectAndUpload(
+      {BoundDevice? remoteDevice,
+      bool includeFiles = false,
+      String? source}) async {
+    if (busy || (remoteDevice != null && !remoteDevice.online)) return;
+    setState(() => selectingFiles = true);
+    final target = remoteDevice ?? activeRemoteDevice;
+    final targetPath = remoteDevice != null &&
+            remoteDevice.deviceId != activeRemoteDevice?.deviceId
+        ? ''
+        : pathController.text;
+    var stage = '选择文件';
+    try {
+      final action = source ??
+          await showModalBottomSheet<String>(
+            context: context,
+            builder: (context) => SafeArea(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+              if (remoteDevice != null)
+                ListTile(title: Text('上传到 ${remoteDevice.name}')),
+              ListTile(
+                  leading: const Icon(Icons.photo_library),
+                  title: Text(includeFiles ? '从相册选择图片' : '选择图片'),
+                  onTap: () => Navigator.pop(context, 'images')),
+              ListTile(
+                  leading: const Icon(Icons.video_library),
+                  title: Text(includeFiles ? '从相册选择视频' : '选择视频'),
+                  onTap: () => Navigator.pop(context, 'video')),
+              if (includeFiles)
+                ListTile(
+                    leading: const Icon(Icons.insert_drive_file),
+                    title: const Text('选择文件'),
+                    onTap: () => Navigator.pop(context, 'files')),
+            ])),
+          );
+      if (action == null || !mounted) return;
+      debugPrint(
+          '[SE9-MEDIA] selecting source=$action device=${target?.deviceId ?? 'local'}');
+      final List<PlatformFile> selected;
+      if (action == 'files') {
+        final result = await FilePicker.platform
+            .pickFiles(withData: false, allowMultiple: true);
+        selected = result?.files ?? [];
+      } else {
+        final picker = widget.imagePicker ?? ImagePicker();
+        final List<XFile> media;
+        if (action == 'images') {
+          media = await picker.pickMultiImage();
+        } else {
+          final video = await picker.pickVideo(source: ImageSource.gallery);
+          media = video == null ? [] : [video];
+        }
+        stage = '读取所选文件';
+        selected = [];
+        for (final item in media) {
+          selected.add(PlatformFile(
+              name: item.name, size: await item.length(), path: item.path));
+        }
+      }
+      if (!mounted || selected.isEmpty) return;
+      if (remoteDevice != null) {
+        setState(() => selectRemoteDevice(remoteDevice));
+      }
+      debugPrint(
+          '[SE9-MEDIA] selected ${selected.length} file(s), bytes=${selected.fold<int>(0, (sum, f) => sum + f.size)}');
+      await uploadPickedFiles(selected, target, targetPath: targetPath);
+    } catch (e, stack) {
+      debugPrint('[SE9-MEDIA] $stage failed: $e');
+      if (kDebugMode) debugPrintStack(stackTrace: stack);
+      if (mounted) setState(() => message = '$stage失败: $e');
+    } finally {
+      if (mounted) setState(() => selectingFiles = false);
     }
-    final result = await FilePicker.platform
-        .pickFiles(withData: false, allowMultiple: true);
-    if (result == null || !mounted) return;
-    await uploadPickedFiles(result.files, device);
   }
 
   Future<void> login() async {
@@ -1686,23 +1729,22 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> pickAndUpload() async {
-    if (busy) return;
-    final target = activeRemoteDevice;
-    final result = await FilePicker.platform
-        .pickFiles(withData: false, allowMultiple: true);
-    if (result == null || !mounted) return;
-    await uploadPickedFiles(result.files, target);
-  }
+  Future<void> pickAndUpload() => selectAndUpload(source: 'files');
 
   Future<void> uploadPickedFiles(
-      List<PlatformFile> selected, BoundDevice? target) async {
-    final targetPath = pathController.text;
+      List<PlatformFile> selected, BoundDevice? target,
+      {required String targetPath}) async {
     setState(() => progress = 0);
     try {
       for (final file in selected) {
+        beginTransfer(file.name, target, 'upload');
         void update(double value) {
-          if (mounted) setState(() => progress = value);
+          if (mounted) {
+            setState(() {
+              progress = value;
+              transferState = 'transferring';
+            });
+          }
         }
 
         if (target == null) {
@@ -1710,6 +1752,7 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
         } else {
           await api.remoteUpload(target.deviceId, file, targetPath, update);
         }
+        if (mounted) setState(() => transferState = 'completed');
       }
       if (!mounted) return;
       await refresh();
@@ -1717,8 +1760,15 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
         setState(
             () => message = target == null ? '文件上传完成' : '已上传到 ${target.name}');
       }
-    } catch (e) {
-      if (mounted) setState(() => message = '上传失败: $e');
+    } catch (e, stack) {
+      debugPrint('[SE9-MEDIA] upload failed: $e');
+      if (kDebugMode) debugPrintStack(stackTrace: stack);
+      if (mounted) {
+        setState(() {
+          transferState = 'failed';
+          message = '上传失败: $e';
+        });
+      }
     } finally {
       if (mounted) setState(() => progress = null);
     }
@@ -1736,61 +1786,8 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> pickFromGallery(
-      {String? source, BoundDevice? remoteDevice}) async {
-    final targetDevice = remoteDevice ?? activeRemoteDevice;
-    final targetPath = pathController.text;
-    final action = source ??
-        await showModalBottomSheet<String>(
-            context: context,
-            builder: (context) => SafeArea(
-                    child: Wrap(children: [
-                  ListTile(
-                      leading: const Icon(Icons.photo_library),
-                      title: const Text('选择图片'),
-                      onTap: () => Navigator.pop(context, 'images')),
-                  ListTile(
-                      leading: const Icon(Icons.video_library),
-                      title: const Text('选择视频'),
-                      onTap: () => Navigator.pop(context, 'video'))
-                ])));
-    if (action == null || !mounted) return;
-    final picker = ImagePicker();
-    try {
-      final List<XFile> media;
-      if (action == 'images') {
-        media = await picker.pickMultiImage();
-      } else {
-        final video = await picker.pickVideo(source: ImageSource.gallery);
-        media = video == null ? [] : [video];
-      }
-      if (media.isEmpty || !mounted) return;
-      setState(() => progress = 0);
-      for (final item in media) {
-        final file = PlatformFile(
-            name: item.name, size: await item.length(), path: item.path);
-        void updateProgress(double value) {
-          if (mounted) setState(() => progress = value);
-        }
-
-        if (targetDevice == null) {
-          await api.upload(file, targetPath, updateProgress);
-        } else {
-          await api.remoteUpload(
-              targetDevice.deviceId, file, targetPath, updateProgress);
-        }
-      }
-      await refresh();
-      if (mounted) {
-        setState(() => message =
-            targetDevice == null ? '相册媒体上传完成' : '已上传到 ${targetDevice.name}');
-      }
-    } catch (e) {
-      if (mounted) setState(() => message = '相册媒体上传失败: $e');
-    } finally {
-      if (mounted) setState(() => progress = null);
-    }
-  }
+  Future<void> pickFromGallery({String? source, BoundDevice? remoteDevice}) =>
+      selectAndUpload(source: source, remoteDevice: remoteDevice);
 
   Future<void> showTransferTasks() async {
     try {
@@ -1808,7 +1805,7 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
                       ListTile(
                           title: Text(task.name),
                           subtitle: Text(
-                              '${task.state} · ${(task.progress * 100).toStringAsFixed(1)}% · ${task.transport}\n${task.error}'),
+                              '${task.state} · ${(task.progress * 100).toStringAsFixed(1)}% · ${TransferStatusCard.channelLabel(task.transport)}\n${task.error}'),
                           isThreeLine: task.error.isNotEmpty,
                           trailing: PopupMenuButton<String>(
                               onSelected: (action) async {
@@ -1877,8 +1874,7 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
         if (loadingDevices) const LinearProgressIndicator(),
         if (deviceListError != null) Text('设备列表加载失败：$deviceListError'),
         if (!loadingDevices && deviceListError == null && boundDevices.isEmpty)
-          Text(
-              api.cloudToken == null ? '登录后查看账号绑定的设备' : '暂无绑定设备，请点击右上角发现设备并绑定'),
+          Text(api.cloudToken == null ? '登录后查看账号绑定的设备' : '暂无绑定设备，点击 Add 添加设备'),
         if (boundDevices.isNotEmpty)
           ConstrainedBox(
             constraints: BoxConstraints(
@@ -1940,106 +1936,93 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
-            title: Text(activeRemoteDevice == null
-                ? 'SE9 文件管理'
-                : 'SE9 · ${activeRemoteDevice!.name}'),
+            title: Text(
+                activeRemoteDevice == null
+                    ? 'SE9 文件管理'
+                    : 'SE9 · ${activeRemoteDevice!.name}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
             actions: [
               IconButton(
                   tooltip: '账号',
                   onPressed: busy ? null : accountActions,
                   icon: const Icon(Icons.account_circle)),
               IconButton(
-                  tooltip: '连接本地设备',
-                  onPressed: busy ? null : configureDeviceUrl,
-                  icon: const Icon(Icons.settings)),
+                  tooltip: '传输任务',
+                  onPressed: api.cloudToken == null ? null : showTransferTasks,
+                  icon: const Icon(Icons.swap_vert)),
               IconButton(
                   tooltip: api.cloudToken == null ? '登录' : '已登录：账号信息',
                   onPressed: busy ? null : login,
                   icon: Icon(api.cloudToken == null
                       ? Icons.login
                       : Icons.verified_user)),
-              IconButton(
-                  tooltip: '发现并绑定设备',
-                  onPressed: discovering || busy ? null : discoverDevices,
-                  icon: const Icon(Icons.wifi_find)),
+              TextButton.icon(
+                  onPressed: busy ? null : addDevice,
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add')),
             ]),
         body: Padding(
             padding: const EdgeInsets.all(16),
-            child: Column(children: [
-              buildBoundDevices(),
-              if (currentTransfer != null && progress != null)
+            child: CustomScrollView(slivers: [
+              SliverToBoxAdapter(
+                  child: Column(children: [
+                buildBoundDevices(),
+                if (currentTransfer != null || transferName != null)
+                  TransferStatusCard(
+                      name: currentTransfer?.name ?? transferName!,
+                      transport:
+                          currentTransfer?.transport ?? transferTransport,
+                      phase: currentTransfer?.phase ?? '',
+                      state: currentTransfer?.state ?? transferState,
+                      direction:
+                          currentTransfer?.direction ?? transferDirection,
+                      progress: currentTransfer?.progress ?? progress,
+                      onPause: currentTransfer != null &&
+                              !currentTransfer!.terminal &&
+                              progress != null
+                          ? api.pauseTransfer
+                          : null),
                 Row(children: [
                   Expanded(
-                      child: Text(
-                          '${currentTransfer!.name} · ${currentTransfer!.transport} · ${currentTransfer!.state}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis)),
+                      child: TextField(
+                          controller: pathController,
+                          enabled: !busy,
+                          decoration:
+                              const InputDecoration(labelText: '目录路径（留空为根目录）'),
+                          onSubmitted: (_) => refresh())),
                   IconButton(
-                      tooltip: '暂停传输',
-                      onPressed: api.pauseTransfer,
-                      icon: const Icon(Icons.pause)),
+                      tooltip: '刷新文件',
+                      onPressed: canUseFiles ? refresh : null,
+                      icon: const Icon(Icons.refresh)),
+                  IconButton(
+                      tooltip: '新建文件夹',
+                      onPressed: canUseFiles ? createFolder : null,
+                      icon: const Icon(Icons.create_new_folder)),
                 ]),
-              if (devices.isNotEmpty)
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 112),
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: devices.length,
-                    itemBuilder: (_, i) {
-                      final d = devices[i];
-                      final bound = boundDevices
-                          .any((device) => device.deviceId == d.deviceId);
-                      return Card(
-                          child: ListTile(
-                        title: Text(d.name,
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
-                        subtitle: Text('${d.address.address}:${d.port}'),
-                        trailing: TextButton(
-                            onPressed:
-                                bound || busy ? null : () => pairDevice(d),
-                            child: Text(bound ? '已绑定' : '绑定')),
-                      ));
-                    },
-                  ),
-                ),
-              Row(children: [
-                Expanded(
-                    child: TextField(
-                        controller: pathController,
-                        enabled: !busy,
-                        decoration:
-                            const InputDecoration(labelText: '目录路径（留空为根目录）'),
-                        onSubmitted: (_) => refresh())),
-                IconButton(
-                    tooltip: '刷新文件',
-                    onPressed: canUseFiles ? refresh : null,
-                    icon: const Icon(Icons.refresh)),
-                IconButton(
-                    tooltip: '新建文件夹',
-                    onPressed: canUseFiles ? createFolder : null,
-                    icon: const Icon(Icons.create_new_folder)),
-              ]),
-              Row(children: [
-                Expanded(
-                    child: TextField(
-                        decoration: const InputDecoration(
-                            prefixIcon: Icon(Icons.search),
-                            labelText: '搜索当前目录'),
-                        onChanged: (value) => setState(
-                            () => searchQuery = value.trim().toLowerCase()))),
-                IconButton(
-                    tooltip: '上传相册图片或视频',
-                    onPressed: canUseFiles ? pickFromGallery : null,
-                    icon: const Icon(Icons.photo_library)),
-                IconButton(
-                    tooltip: '上传文件',
-                    onPressed: canUseFiles ? pickAndUpload : null,
-                    icon: const Icon(Icons.upload_file)),
-              ]),
-              if (progress != null) LinearProgressIndicator(value: progress),
-              if (loadingFiles || downloading) const LinearProgressIndicator(),
-              Align(alignment: Alignment.centerLeft, child: Text(message)),
-              Expanded(child: Builder(builder: (_) {
+                Row(children: [
+                  Expanded(
+                      child: TextField(
+                          decoration: const InputDecoration(
+                              prefixIcon: Icon(Icons.search),
+                              labelText: '搜索当前目录'),
+                          onChanged: (value) => setState(
+                              () => searchQuery = value.trim().toLowerCase()))),
+                  IconButton(
+                      tooltip: '上传相册图片或视频',
+                      onPressed: canUseFiles ? pickFromGallery : null,
+                      icon: const Icon(Icons.photo_library)),
+                  IconButton(
+                      tooltip: '上传文件',
+                      onPressed: canUseFiles ? pickAndUpload : null,
+                      icon: const Icon(Icons.upload_file)),
+                ]),
+                if (progress != null) LinearProgressIndicator(value: progress),
+                if (loadingFiles || downloading)
+                  const LinearProgressIndicator(),
+                Align(alignment: Alignment.centerLeft, child: Text(message)),
+              ])),
+              SliverLayoutBuilder(builder: (_, constraints) {
                 final visibleFiles = files
                     .where((file) =>
                         searchQuery.isEmpty ||
@@ -2048,12 +2031,14 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
                             .contains(searchQuery))
                     .toList();
                 if (visibleFiles.isEmpty && !loadingFiles) {
-                  return Center(
-                      child: Text(activeRemoteDevice == null
-                          ? '选择设备后查看文件'
-                          : '当前目录暂无文件'));
+                  return SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: Center(
+                          child: Text(activeRemoteDevice == null
+                              ? '选择设备后查看文件'
+                              : '当前目录暂无文件')));
                 }
-                return ListView.builder(
+                return SliverList.builder(
                     itemCount: visibleFiles.length,
                     itemBuilder: (_, i) {
                       final f = visibleFiles[i];
@@ -2103,7 +2088,7 @@ class _FilePageState extends State<FilePage> with WidgetsBindingObserver {
                               ]),
                       );
                     });
-              })),
+              }),
             ])),
       );
 }

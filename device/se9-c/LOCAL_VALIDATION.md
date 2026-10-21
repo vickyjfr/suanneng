@@ -43,7 +43,7 @@ cmake --build /tmp/se9-c-asan
 
 本机产物是 macOS 程序，不能复制到 Linux NAS。应在 NAS 或对应 Linux 工具链重新编译。更新前保留现有二进制备份；不覆盖 `/etc/se9` 配置、设备私钥、设备 token 或用户文件。
 
-Agent 已内置 `http://123.56.147.51:80` 和 `/se9`，正常部署无需配置服务器地址。此本机脚本会显式覆盖云端 URL 并将前缀设为空字符串，保证只访问临时本机服务。已有部署的 File API 端口是 18443 时，应保留 `FILE_API_PORT=18443`。Agent 与 File API 的代理密钥必须一致。
+Agent 已内置 `https://123.56.147.51:8443` 和 `/se9`，正常部署无需配置服务器地址。此本机脚本会显式覆盖云端 URL 并将前缀设为空字符串，保证只访问临时本机服务。已有部署的 File API 端口是 18443 时，应保留 `FILE_API_PORT=18443`。Agent 与 File API 的代理密钥必须一致。
 
 systemd 模板将 Agent 输出写入 `/var/log/se9/agent.log` 和 `/var/log/se9/agent.error.log`，不应只依赖 `journalctl` 查业务日志。2026-10-20 已将当前 Cloud（含账号设备列表）部署到阿里云；Go 后端端口为 18082，公网前缀为 `/se9`。完整设备部署与参数说明见 [README.md](README.md)。
 
@@ -90,6 +90,6 @@ Replace the C binary arguments with the corresponding programs under `/tmp/se9-c
 
 Local executables target macOS and cannot be copied to Linux NAS. Rebuild on the NAS or with the appropriate Linux toolchain. Back up existing binaries before updating; preserve `/etc/se9`, device private keys, device tokens, and user files.
 
-Agent has `http://123.56.147.51:80` and `/se9` built in; normal deployment needs no cloud settings. This local script explicitly overrides the cloud URL and sets the prefix to an empty string, ensuring it only accesses temporary localhost services. Preserve `FILE_API_PORT=18443` when that is the existing deployment’s File API port. Agent and File API proxy secrets must match.
+Agent has `https://123.56.147.51:8443` and `/se9` built in; normal deployment needs no cloud settings. This local script explicitly overrides the cloud URL and sets the prefix to an empty string, ensuring it only accesses temporary localhost services. Preserve `FILE_API_PORT=18443` when that is the existing deployment’s File API port. Agent and File API proxy secrets must match.
 
 The systemd template writes Agent output to `/var/log/se9/agent.log` and `/var/log/se9/agent.error.log`; business logs may not appear in `journalctl`. The current Cloud, including account device lists, was deployed to Alibaba Cloud on 2026-10-20. Its Go backend port is 18082 and public prefix is `/se9`. See [README.md](README.md) for complete device deployment and parameter instructions.

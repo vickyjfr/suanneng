@@ -1,0 +1,16 @@
+#!/bin/sh
+# Refreshes the TURN-only certificate copy from the short-lived Let's Encrypt
+# IP certificate. Nginx IP:443 deliberately keeps the stable *.hualaikeji.com
+# certificate (deploy/se9-ip-https.conf); do not install the IP certificate
+# into the nginx vhost, because its rotation breaks pinned-IP clients.
+set -eu
+install -d -o root -g turnserver -m 0750 /etc/se9-turn
+install -o root -g turnserver -m 0640 /etc/se9-certbot/live/123.56.147.51/fullchain.pem /etc/se9-turn/fullchain.pem.new
+install -o root -g turnserver -m 0640 /etc/se9-certbot/live/123.56.147.51/privkey.pem /etc/se9-turn/privkey.pem.new
+mv /etc/se9-turn/fullchain.pem.new /etc/se9-turn/fullchain.pem
+mv /etc/se9-turn/privkey.pem.new /etc/se9-turn/privkey.pem
+nginx -t
+systemctl reload nginx
+if systemctl is-active --quiet se9-turn.service; then
+    systemctl restart se9-turn.service
+fi

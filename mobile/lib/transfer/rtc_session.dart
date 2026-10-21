@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:flutter/foundation.dart';
 import 'ft_protocol.dart';
 
 typedef TransferCloudCall = Future<Map<String, dynamic>> Function(
@@ -46,10 +47,11 @@ class _IncomingBlock {
 
 class RtcTransferSession {
   RtcTransferSession(this.cloud, this.deviceId,
-      {this.allowLegacyRelay = true, this.forceRelay = false});
+      {this.allowLegacyRelay = true, this.forceRelay = false, this.onStage});
   final TransferCloud cloud;
   final String deviceId;
   final bool allowLegacyRelay, forceRelay;
+  final void Function(String)? onStage;
   RTCPeerConnection? peer;
   RTCDataChannel? control, data;
   WebSocket? signal;
@@ -76,18 +78,39 @@ class RtcTransferSession {
       failure != null ||
       DateTime.now().difference(created) >= const Duration(minutes: 50);
 
+  Future<T> _step<T>(String stage, Future<T> Function() action) async {
+    onStage?.call(stage);
+    final watch = Stopwatch()..start();
+    debugPrint('[SE9-RTC] device=$deviceId stage=$stage begin');
+    try {
+      final result = await action().timeout(const Duration(seconds: 15));
+      debugPrint(
+          '[SE9-RTC] stage=$stage done elapsedMs=${watch.elapsedMilliseconds}');
+      return result;
+    } on TimeoutException {
+      debugPrint('[SE9-RTC] stage=$stage timed out');
+      throw TransferException('RTC_SETUP_TIMEOUT', '$stage超时，请重试');
+    } catch (error) {
+      debugPrint('[SE9-RTC] stage=$stage failed type=${error.runtimeType}');
+      rethrow;
+    }
+  }
+
   Future<void> open() async {
     cloud.uri('/api/v2/rtc/ice');
+    onStage?.call('获取 ICE 配置');
     final ice = await cloud.call(
         'GET',
         '/api/v2/rtc/ice?deviceId=${Uri.encodeQueryComponent(deviceId)}',
         null,
         200);
-    peer = await createPeerConnection({
-      'iceServers': ice['iceServers'],
-      'iceTransportPolicy': forceRelay ? 'relay' : 'all',
-      'sdpSemantics': 'unified-plan'
-    });
+    peer = await _step(
+        '创建 WebRTC 连接',
+        () => createPeerConnection({
+              'iceServers': ice['iceServers'],
+              'iceTransportPolicy': forceRelay ? 'relay' : 'all',
+              'sdpSemantics': 'unified-plan'
+            }));
     peer!.onIceCandidate = (candidate) {
       if (candidate.candidate?.isNotEmpty == true) {
         if (signal != null) {
@@ -98,23 +121,31 @@ class RtcTransferSession {
       }
     };
     peer!.onConnectionState = (state) {
+      debugPrint('[SE9-RTC] connection=$state');
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         _fail('CHANNEL_CLOSED');
       }
     };
-    control = await peer!.createDataChannel(
-        'se9.control.v1', RTCDataChannelInit()..ordered = true);
-    data = await peer!
-        .createDataChannel('se9.file.v1', RTCDataChannelInit()..ordered = true);
+    control = await _step(
+        '创建控制通道',
+        () => peer!.createDataChannel(
+            'se9.control.v1', RTCDataChannelInit()..ordered = true));
+    data = await _step(
+        '创建文件通道',
+        () => peer!.createDataChannel(
+            'se9.file.v1', RTCDataChannelInit()..ordered = true));
     control!.onDataChannelState = (_) => _checkOpen();
     data!.onDataChannelState = (_) => _checkOpen();
     control!.onMessage = _onControl;
     data!.onMessage = _onData;
-    final offer = await peer!.createOffer(
-        {'offerToReceiveAudio': false, 'offerToReceiveVideo': false});
-    await peer!.setLocalDescription(offer);
+    final offer = await _step(
+        '生成 offer',
+        () => peer!.createOffer(
+            {'offerToReceiveAudio': false, 'offerToReceiveVideo': false}));
+    await _step('设置本地描述', () => peer!.setLocalDescription(offer));
     offerHash = await transferHash(utf8.encode(offer.sdp!));
+    onStage?.call('创建云端 RTC 会话');
     info = await cloud.call(
         'POST',
         '/api/v2/rtc/sessions',
@@ -127,6 +158,7 @@ class RtcTransferSession {
           'allowLegacyRelay': allowLegacyRelay
         },
         201);
+    onStage?.call('连接信令服务');
     final url =
         cloud.uri('/api/v2/rtc/signaling/app', {'rtcSessionId': id}, true);
     signal = await WebSocket.connect(url.toString(), headers: cloud.headers())
@@ -149,8 +181,11 @@ class RtcTransferSession {
       _sendCandidate(candidate);
     }
     _candidates.clear();
+    onStage?.call('等待设备应答和数据通道');
+    debugPrint('[SE9-RTC] session=$id waiting for answer/channels');
     await Future.wait([_answered.future, _channelsOpen.future])
         .timeout(const Duration(seconds: 25));
+    onStage?.call('验证传输授权');
     await command('BIND', {'grant': info!['grant']});
     created = DateTime.now();
     _renewTimer = Timer.periodic(const Duration(minutes: 4), (_) => renew());

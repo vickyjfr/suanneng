@@ -69,7 +69,7 @@ func main() {
 	if rtcErr != nil {
 		log.Fatalf("RTC initialization: %v", rtcErr)
 	}
-	addr := ":" + getenv("PORT", "8080")
+	addr := getenv("LISTEN_ADDR", ":"+getenv("PORT", "8080"))
 	log.Printf("SE9 cloud service listening on %s", addr)
 	handler := c.handler()
 	server := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second}

@@ -11,11 +11,12 @@ class TransferManager {
       required this.userId,
       required this.repository,
       this.onUpdate,
-      this.forceRelay = false});
+      this.forceRelay = false,
+      this.allowLegacyRelay = true});
   final TransferCloud cloud;
   final String userId;
   final TransferRepository repository;
-  final bool forceRelay;
+  final bool forceRelay, allowLegacyRelay;
   final void Function(FileTransferTask task)? onUpdate;
   final List<FileTransferTask> tasks = [];
   FileTransferTask? _active;
@@ -55,6 +56,7 @@ class TransferManager {
     _pause = _cancel = false;
     tasks.add(task);
     try {
+      task.phase = '复制所选文件';
       await _notify(task);
       final target = File(task.localPath);
       if (source.path != null) {
@@ -71,6 +73,8 @@ class TransferManager {
         throw const TransferException('SOURCE_UNAVAILABLE');
       }
       task.size = await target.length();
+      task.phase = '计算文件校验值';
+      await _notify(task);
       task.hash = await repository.hashFile(target);
       await _notify(task);
       await _run(task, progress);
@@ -145,6 +149,11 @@ class TransferManager {
     if (task.terminal) {
       return;
     }
+    if (task.remoteId.isEmpty) {
+      task.state = 'cancelled';
+      await _notify(task);
+      return;
+    }
     task.state = 'cancel-pending';
     await _notify(task);
     await resumeTask(task, (_) {});
@@ -193,13 +202,18 @@ class TransferManager {
     }
 
     Future<void> connect() async {
-      session =
-          RtcTransferSession(cloud, task.deviceId, forceRelay: forceRelay);
+      session = RtcTransferSession(cloud, task.deviceId,
+          forceRelay: forceRelay,
+          allowLegacyRelay: allowLegacyRelay, onStage: (phase) {
+        task.phase = phase;
+        onUpdate?.call(task);
+      });
       try {
         await session!.open();
         wire = RtcTransferWire(session!);
       } catch (error) {
-        if (session!.info == null ||
+        if (!allowLegacyRelay ||
+            session!.info == null ||
             error is TransferException &&
                 const {'RTC_AUTH_FAILED', 'RTC_TLS_REQUIRED'}
                     .contains(error.code)) {
@@ -216,6 +230,7 @@ class TransferManager {
         session!.keepLeaseForFallback();
       }
       task.transport = wire!.kind;
+      await _notify(task);
       if (task.remoteId.isNotEmpty) {
         remote = await wire!.resume(task.wire(await repository.token(task)));
       } else {
@@ -241,6 +256,14 @@ class TransferManager {
 
     try {
       await connect();
+      if (_cancel) {
+        await wire!.cancel(remote!);
+        task.state = 'cancelled';
+        task.error = '';
+        await _notify(task);
+        await repository.removeToken(task);
+        return;
+      }
       if (task.direction == 'upload') {
         local = await File(task.localPath).open();
       } else {
@@ -249,6 +272,7 @@ class TransferManager {
           await file.create();
         }
         local = await file.open(mode: FileMode.writeOnlyAppend);
+        await local.truncate(task.size);
       }
       while (true) {
         try {
@@ -293,6 +317,7 @@ class TransferManager {
             }
             committed.add(index);
             task.durableBytes += length;
+            if (wire is RtcTransferWire) await session!.updatePathType();
             task.transport = wire!.kind;
             await _notify(task);
             progress(task.progress);
@@ -338,7 +363,7 @@ class TransferManager {
             task.state = 'recovering';
             task.error = '$error';
             await _notify(task);
-            preferLegacy = retries >= 2;
+            preferLegacy = allowLegacyRelay && retries >= 2;
             await disconnect();
             await Future<void>.delayed(Duration(seconds: retries));
             await connect();

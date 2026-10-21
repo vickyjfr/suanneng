@@ -20,7 +20,7 @@
 | C `device/se9-c/se9_file_api.c` | 本地文件 API、上传分片、下载/Range、SHA-256 | 持久化传输任务、用户归属、下载快照、幂等提交与断点恢复 |
 | 部署 | 阿里云 `123.56.147.51`，Nginx `/se9/` → Go `18082` | HTTPS/WSS 信令入口、STUN/TURN 及其端口和配额 |
 
-当前 Agent 已内置 `http://123.56.147.51:80` 和 `/se9`；本机 File API 源码默认端口 `8443`，现有指南使用 `18443`。当前 Agent 中继单帧上限 16 MiB；App 默认上传分片 8 MiB，部分路径会整文件读入内存，上传会话索引不跨重启持久化。这些是需要改造的真实限制，不是本方案的 WebRTC 参数。
+当前 Agent 已内置 `https://123.56.147.51:8443` 和 `/se9`；本机 File API 源码默认端口 `8443`，现有指南使用 `18443`。当前 Agent 中继单帧上限 16 MiB；App 默认上传分片 8 MiB，部分路径会整文件读入内存，上传会话索引不跨重启持久化。这些是需要改造的真实限制，不是本方案的 WebRTC 参数。
 
 既有设备长期私钥、设备 ID、绑定关系、账号、存储文件和 UDP 绑定协议继续使用。新增状态与旧 JSON 状态文件分开存放，避免升级时改变既有身份。
 
@@ -448,7 +448,7 @@ Phase one covers foreground transfers, progress, pause/cancel, resume across pro
 | C `device/se9-c/se9_file_api.c` | Local API, upload chunks, download/Range, SHA-256 | Persistent transfers, principal ownership, download snapshots, idempotent commits/resume |
 | Deployment | Cloud `123.56.147.51`, Nginx `/se9/` → Go `18082` | HTTPS/WSS signaling, STUN/TURN, ports and quotas |
 
-Agent currently embeds `http://123.56.147.51:80` and `/se9`. File API defaults to `8443`; the deployment guide uses `18443`. Existing relay frames are limited to 16 MiB, App upload chunks default to 8 MiB, some paths load entire files into memory, and upload indexes do not persist across restarts. These are current limitations to change, not proposed WebRTC settings.
+Agent currently embeds `https://123.56.147.51:8443` and `/se9`. File API defaults to `8443`; the deployment guide uses `18443`. Existing relay frames are limited to 16 MiB, App upload chunks default to 8 MiB, some paths load entire files into memory, and upload indexes do not persist across restarts. These are current limitations to change, not proposed WebRTC settings.
 
 Keep existing long-lived device keys, IDs, binding, accounts, stored files, and UDP claiming. Store new task state separately from existing cloud JSON so upgrades preserve identities.
 

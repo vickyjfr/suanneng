@@ -1,19 +1,25 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
+import 'package:image_picker/image_picker.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:se9_mobile/main.dart';
+import 'package:se9_mobile/transfer/transfer_repository.dart';
 
 class DeviceApi extends Se9Api {
   DeviceApi() : super('');
   final reads = <String>[];
   final uploads = <String>[];
   final downloads = <String>[];
+  final bindings = <String>[];
+  final uploadedFiles = <PlatformFile>[];
   bool failList = false;
   Completer<List<Map<String, dynamic>>>? pendingRead;
   @override
@@ -52,6 +58,7 @@ class DeviceApi extends Se9Api {
   Future<void> remoteUpload(String deviceId, PlatformFile file, String path,
       void Function(double) progress) async {
     uploads.add('$deviceId:$path:${file.name}');
+    uploadedFiles.add(file);
     progress(1);
   }
 
@@ -60,6 +67,12 @@ class DeviceApi extends Se9Api {
       {int? start, int? end}) async {
     downloads.add('$deviceId:$path');
     return [1, 2, 3];
+  }
+
+  @override
+  Future<void> confirmClaim(String deviceId, String claimString,
+      {String? claimRequestId}) async {
+    bindings.add('$deviceId:$claimRequestId:$claimString');
   }
 
   @override
@@ -102,6 +115,47 @@ class TestPicker extends FilePicker {
     savedName = fileName;
     savedBytes = bytes;
     return cancelSave ? null : '/saved/$fileName';
+  }
+}
+
+class PendingVideoPicker extends ImagePicker {
+  int requests = 0;
+  Completer<XFile?> pending = Completer<XFile?>();
+
+  @override
+  Future<XFile?> pickVideo({
+    required ImageSource source,
+    CameraDevice preferredCameraDevice = CameraDevice.rear,
+    Duration? maxDuration,
+  }) {
+    requests++;
+    return pending.future;
+  }
+}
+
+class TestDiscovery extends UdpDiscovery {
+  int searches = 0, pairings = 0;
+  final pendingClaim = Completer<PairingClaim?>();
+  final device = DiscoveredDevice(
+      deviceId: 'new-nas',
+      name: 'New NAS',
+      address: InternetAddress('192.168.1.8'),
+      port: 8443,
+      apiBase: '/api/v2',
+      claimStatus: 'unbound',
+      publicKey: '',
+      signature: '');
+  @override
+  Future<List<DiscoveredDevice>> discover(
+      {Duration timeout = const Duration(seconds: 2)}) async {
+    searches++;
+    return [device];
+  }
+
+  @override
+  Future<PairingClaim?> pair(DiscoveredDevice device) {
+    pairings++;
+    return pendingClaim.future;
   }
 }
 
@@ -188,11 +242,184 @@ void main() {
     await tester.pumpAndSettle();
     expect(api.uploads, ['home::new.png']);
     expect(api.reads.last, 'home:');
+    await tester.scrollUntilVisible(find.text('home.png'), 100,
+        scrollable: find.byType(Scrollable).first);
     expect(find.text('home.png'), findsOneWidget);
-    await tester.tap(find.byTooltip('上传文件'));
+    expect(find.text('传输通道：服务器转发'), findsOneWidget);
+    await tester.ensureVisible(
+        find.byWidgetPredicate((w) => w is IconButton && w.tooltip == '上传文件'));
+    await tester.tap(
+        find.byWidgetPredicate((w) => w is IconButton && w.tooltip == '上传文件'));
     await tester.pumpAndSettle();
     expect(api.uploads.length, 2);
     expect(api.uploads.last, 'home::new.png');
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+      'pending video selection blocks duplicate and file requests, then uploads by path',
+      (tester) async {
+    final api = DeviceApi();
+    final picker = PendingVideoPicker();
+    FilePicker.platform = TestPicker();
+    final video = XFile.fromData(Uint8List.fromList([1, 2, 3, 4]),
+        name: 'clip.mov', path: '/picked/clip.mov');
+    await tester
+        .pumpWidget(MaterialApp(home: FilePage(api: api, imagePicker: picker)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('文件 / 下载').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('photos'));
+    await tester.pumpAndSettle();
+    final galleryCallback = tester
+        .widget<IconButton>(find.byWidgetPredicate(
+            (w) => w is IconButton && w.tooltip == '上传相册图片或视频'))
+        .onPressed!;
+    final fileCallback = tester
+        .widget<IconButton>(find
+            .byWidgetPredicate((w) => w is IconButton && w.tooltip == '上传文件'))
+        .onPressed!;
+    galleryCallback();
+    galleryCallback();
+    await tester.pumpAndSettle();
+    expect(find.text('选择视频'), findsOneWidget);
+    await tester.tap(find.text('选择视频'));
+    await tester.pumpAndSettle();
+    expect(picker.requests, 1);
+    galleryCallback();
+    fileCallback();
+    await tester.pumpAndSettle();
+    expect(picker.requests, 1);
+    expect(api.uploads, isEmpty);
+    expect(
+        tester
+            .widget<IconButton>(find.byWidgetPredicate(
+                (w) => w is IconButton && w.tooltip == '上传文件'))
+            .onPressed,
+        isNull);
+    picker.pending.complete(video);
+    await tester.pumpAndSettle();
+    expect(api.uploads, ['home:photos:clip.mov']);
+    expect(api.uploadedFiles.single.path, video.path);
+    expect(api.uploadedFiles.single.bytes, isNull);
+    expect(api.uploadedFiles.single.size, 4);
+    expect(api.reads.last, 'home:photos');
+    expect(
+        tester
+            .widget<IconButton>(find.byWidgetPredicate(
+                (w) => w is IconButton && w.tooltip == '上传相册图片或视频'))
+            .onPressed,
+        isNotNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('cancelled or failed video selection releases lock for retry',
+      (tester) async {
+    final api = DeviceApi();
+    final picker = PendingVideoPicker();
+    FilePicker.platform = TestPicker();
+    await tester
+        .pumpWidget(MaterialApp(home: FilePage(api: api, imagePicker: picker)));
+    await tester.pumpAndSettle();
+    Future<void> openVideo() async {
+      await tester.tap(find.text('上传').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('从相册选择视频'));
+      await tester.pumpAndSettle();
+    }
+
+    await openVideo();
+    picker.pending.complete(null);
+    await tester.pumpAndSettle();
+    expect(api.uploads, isEmpty);
+    picker.pending = Completer<XFile?>();
+    await openVideo();
+    picker.pending.completeError(PlatformException(
+        code: 'multiple_request', message: 'Cancelled by a second request'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('选择文件失败:'), findsOneWidget);
+    expect(find.textContaining('上传失败:'), findsNothing);
+    picker.pending = Completer<XFile?>();
+    await openVideo();
+    expect(picker.requests, 3);
+    picker.pending.complete(null);
+    await tester.pumpAndSettle();
+    expect(api.uploads, isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('Add isolates installation, discovery and binding from home',
+      (tester) async {
+    final api = DeviceApi();
+    final discovery = TestDiscovery();
+    await tester.pumpWidget(
+        MaterialApp(home: FilePage(api: api, discovery: discovery)));
+    await tester.pumpAndSettle();
+    expect(find.text('搜索设备'), findsNothing);
+    expect(find.text('安装 NAS 程序'), findsNothing);
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+    expect(find.text('添加设备'), findsOneWidget);
+    expect(find.text('安装 NAS 程序'), findsOneWidget);
+    await tester.tap(find.text('搜索设备'));
+    await tester.pumpAndSettle();
+    expect(discovery.searches, 1);
+    expect(find.text('New NAS'), findsOneWidget);
+    await tester.ensureVisible(find.text('绑定'));
+    await tester.tap(find.text('绑定'));
+    await tester.pump();
+    expect(discovery.pairings, 1);
+    expect(find.text('绑定中…'), findsOneWidget);
+    discovery.pendingClaim.complete(const PairingClaim('claim', 'request'));
+    await tester.pumpAndSettle();
+    expect(api.bindings, ['new-nas:request:claim']);
+    expect(find.text('已绑定'), findsOneWidget);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('我的设备'), findsOneWidget);
+    expect(find.text('New NAS'), findsNothing);
+    expect(find.text('绑定'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+      'home reports actual RTC, TURN and relay changes and retains completion',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = DeviceApi();
+    await tester.pumpWidget(MaterialApp(home: FilePage(api: api)));
+    await tester.pumpAndSettle();
+    final task = FileTransferTask(
+        id: 't',
+        userId: 'u',
+        deviceId: 'home',
+        direction: 'upload',
+        path: 'video.mov',
+        localPath: '/video.mov',
+        size: 100,
+        state: 'transferring',
+        transport: '直连');
+    api.onTransferChanged!(task);
+    await tester.pumpAndSettle();
+    expect(find.text('传输通道：WebRTC · 直连'), findsOneWidget);
+    task.transport = 'TURN 中继';
+    api.onTransferChanged!(task);
+    await tester.pumpAndSettle();
+    expect(find.text('传输通道：WebRTC · TURN 中继'), findsOneWidget);
+    task.transport = '服务器转发';
+    api.onTransferChanged!(task);
+    await tester.pumpAndSettle();
+    expect(find.text('传输通道：服务器转发'), findsOneWidget);
+    task.state = 'completed';
+    task.durableBytes = 100;
+    api.onTransferChanged!(task);
+    await tester.pumpAndSettle();
+    expect(find.text('上传 · video.mov · 已完成'), findsOneWidget);
+    expect(find.text('100.0%'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 

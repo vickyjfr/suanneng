@@ -6,7 +6,7 @@
 
 ### 当前部署
 
-2026-10-20 已部署到阿里云 ARM64 服务器 `123.56.147.51`，服务为 `se9-cloud.service`，程序 `/opt/se9-cloud/se9-cloud`，工作目录 `/opt/se9-cloud`，环境文件 `/etc/se9-cloud.env`。Go 监听 `:18082`，Nginx 将公网 `http://123.56.147.51/se9/` 转发到 `http://127.0.0.1:18082/` 并剥离前缀。当前入口使用 HTTP/WS，Go 未开启直接 TLS。
+2026-10-20 已部署到阿里云 ARM64 服务器 `123.56.147.51`，服务为 `se9-cloud.service`，程序 `/opt/se9-cloud/se9-cloud`，工作目录 `/opt/se9-cloud`，环境文件 `/etc/se9-cloud.env`。Go 监听 `:18082`，Nginx 将公网 `https://123.56.147.51:8443/se9/` 转发到 `http://127.0.0.1:18082/` 并剥离前缀；`http://123.56.147.51/se9/` 保留为兼容入口。8443 使用 IP SAN 证书，443 留给 PSYNC 的域名证书。Go 未开启直接 TLS。
 
 详细的参数表、当前 unit 和 Nginx 配置、构建上传、备份、替换、验收及回滚说明见 **[NAS 部署与运维，第 8–9 节](../../device/se9-c/README.md)**。
 
@@ -38,7 +38,7 @@ The Go cloud service implements account authentication, device registration/clai
 
 ### Current deployment
 
-Deployed on 2026-10-20 to Alibaba Cloud ARM64 host `123.56.147.51`. The service is `se9-cloud.service`, executable `/opt/se9-cloud/se9-cloud`, working directory `/opt/se9-cloud`, environment file `/etc/se9-cloud.env`. Go listens on `:18082`; Nginx forwards public `http://123.56.147.51/se9/` to `http://127.0.0.1:18082/` and removes the prefix. The current entry uses HTTP/WS; Go direct TLS is disabled.
+Deployed on 2026-10-20 to Alibaba Cloud ARM64 host `123.56.147.51`. The service is `se9-cloud.service`, executable `/opt/se9-cloud/se9-cloud`, working directory `/opt/se9-cloud`, environment file `/etc/se9-cloud.env`. Go listens on `:18082`; Nginx forwards public `https://123.56.147.51:8443/se9/` to `http://127.0.0.1:18082/` and removes the prefix; `http://123.56.147.51/se9/` remains as a compatibility entry. Port 8443 uses the IP-SAN certificate; port 443 is reserved for the PSYNC domain certificate. Go direct TLS is disabled.
 
 For complete parameter tables, current unit/Nginx settings, building/uploading, backup, replacement, verification, and rollback, see **[NAS Deployment and Operations, sections 8–9](../../device/se9-c/README.md)**.
 

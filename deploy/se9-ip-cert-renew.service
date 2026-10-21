@@ -1,0 +1,7 @@
+[Unit]
+Description=Renew the SE9 public IP certificate
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/opt/se9-certbot/bin/certbot renew --config-dir /etc/se9-certbot --work-dir /var/lib/se9-certbot --logs-dir /var/log/se9-certbot --quiet --no-random-sleep-on-renew --deploy-hook /usr/local/sbin/se9-ip-certificate-hook

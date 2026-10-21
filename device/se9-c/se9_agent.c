@@ -22,6 +22,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "rtc/rtc_transport.h"
+#include "rtc/device_config.h"
 
 #define UDP_PORT 37020
 #define PACKET_MAX 4096
@@ -36,8 +37,8 @@ static EVP_PKEY *handshake_key = NULL;
 static unsigned char session_secret[32];
 static char lan_session_id[65] = "";
 static time_t lan_session_expires = 0;
-static char cloud_url[256] = "http://123.56.147.51:80";
-static char cloud_base_path[128] = "/se9";
+static char cloud_url[256] = SE9_DEFAULT_CLOUD_URL;
+static char cloud_base_path[128] = SE9_DEFAULT_CLOUD_BASE_PATH;
 static char cloud_device_token[256] = "";
 static char proxy_token[129] = "";
 static char token_file[PATH_MAX] = "/var/lib/se9/device-token";
@@ -47,6 +48,13 @@ static bool random_bytes(void *buffer, size_t length);
 static bool b64_encode(const unsigned char *input, size_t length, char *output, size_t capacity);
 static int connect_host(const char *host, int port);
 static bool cloud_request(const char *path, const char *body, const char *token, char *response, size_t response_cap);
+
+static bool tls_peer_identity(SSL *ssl, const char *host) {
+    unsigned char address[16];
+    if (inet_pton(AF_INET, host, address) == 1 || inet_pton(AF_INET6, host, address) == 1)
+        return X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), host) == 1;
+    return SSL_set1_host(ssl, host) == 1;
+}
 
 static bool ws_write_all(SSL *ssl, int fd, const void *data, size_t length) {
     const unsigned char *cursor = data;
@@ -217,7 +225,7 @@ static bool websocket_session(void) {
     else if (SSL_CTX_load_verify_locations(ctx, ca_file, NULL) != 1) { SSL_CTX_free(ctx); close(fd); return false; }
     if (!tls_insecure) SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
     ssl = SSL_new(ctx);
-    if (!ssl || SSL_set_tlsext_host_name(ssl, host) != 1 || (!tls_insecure && SSL_set1_host(ssl, host) != 1) || SSL_set_fd(ssl, fd) != 1 || SSL_connect(ssl) != 1) {
+    if (!ssl || SSL_set_tlsext_host_name(ssl, host) != 1 || (!tls_insecure && !tls_peer_identity(ssl, host)) || SSL_set_fd(ssl, fd) != 1 || SSL_connect(ssl) != 1) {
         SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return false;
     }
     }
@@ -519,6 +527,8 @@ static void send_pairing_result(int fd, const struct sockaddr_in *peer, socklen_
 }
 
 static bool cloud_request(const char *path, const char *body, const char *token, char *response, size_t response_cap) {
+    if (!response || !response_cap) return false;
+    response[0] = 0;
     if (!response || response_cap == 0) return false;
     response[0] = 0;
     char host[128]; int port = 0;
@@ -538,7 +548,7 @@ static bool cloud_request(const char *path, const char *body, const char *token,
         else if (SSL_CTX_load_verify_locations(ctx, ca_file, NULL) != 1) { SSL_CTX_free(ctx); close(fd); return false; }
         if (!tls_insecure) SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
     ssl = SSL_new(ctx);
-        if (!ssl || SSL_set_tlsext_host_name(ssl, host) != 1 || (!tls_insecure && SSL_set1_host(ssl, host) != 1) || SSL_set_fd(ssl, fd) != 1 || SSL_connect(ssl) != 1) { SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return false; }
+        if (!ssl || SSL_set_tlsext_host_name(ssl, host) != 1 || (!tls_insecure && !tls_peer_identity(ssl, host)) || SSL_set_fd(ssl, fd) != 1 || SSL_connect(ssl) != 1) { SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return false; }
     }
     char request_path[512]; int path_length = snprintf(request_path, sizeof(request_path), "%s%s", cloud_base_path, path);
     if (path_length <= 0 || (size_t)path_length >= sizeof(request_path)) { if (ssl) { SSL_free(ssl); SSL_CTX_free(ctx); } close(fd); return false; }
@@ -581,7 +591,15 @@ static void *heartbeat_worker(void *unused) {
     return NULL;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--config-info")) {
+#ifdef SE9_WITH_WEBRTC
+        return se9_print_config_info(true);
+#else
+        return se9_print_config_info(false);
+#endif
+    }
+    if (argc != 1) { fprintf(stderr, "usage: se9_agent [--config-info]\n"); return 1; }
     const char *env;
     if ((env = getenv("SE9_KEY_FILE")) && *env) snprintf(key_file, sizeof(key_file), "%s", env);
     if ((env = getenv("SE9_DEVICE_NAME")) && *env) snprintf(device_name, sizeof(device_name), "%s", env);
@@ -589,7 +607,7 @@ int main(void) {
     if ((env = getenv("SE9_CLOUD_URL")) && *env) snprintf(cloud_url, sizeof(cloud_url), "%s", env);
     if ((env = getenv("SE9_CLOUD_BASE_PATH"))) snprintf(cloud_base_path, sizeof(cloud_base_path), "%s", env);
     if ((env = getenv("SE9_TOKEN_FILE")) && *env) snprintf(token_file, sizeof(token_file), "%s", env);
-    if ((env = getenv("SE9_AGENT_PROXY_TOKEN")) && *env) snprintf(proxy_token, sizeof(proxy_token), "%s", env);
+    if (!se9_load_proxy_token(proxy_token, sizeof(proxy_token))) { fprintf(stderr, "cannot load local proxy key; create /var/lib/se9 with service ownership or check SE9_AGENT_PROXY_TOKEN_FILE\n"); return 1; }
     if ((env = getenv("SE9_CA_FILE")) && *env) snprintf(ca_file, sizeof(ca_file), "%s", env);
     if ((env = getenv("SE9_TLS_INSECURE")) && !strcmp(env, "1")) tls_insecure = true;
     EVP_PKEY *key = load_or_create_key();
@@ -605,8 +623,9 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
     fprintf(stdout, "SE9 Agent UDP discovery listening on 0.0.0.0:%d, device=%s\n", UDP_PORT, device_id);
     cloud_register(key);
+    if (!cloud_device_token[0]) { fprintf(stderr, "cloud registration failed; restart after checking network and certificate trust\n"); return 1; }
 #ifdef SE9_WITH_WEBRTC
-    if (!se9_rtc_start(device_id, key, cloud_device_token, cloud_url, cloud_base_path, api_port, proxy_token, ca_file)) fprintf(stderr, "[RTC] initialization failed; RTC capability unavailable\n");
+    if (!se9_rtc_start(device_id, key, cloud_device_token, cloud_url, cloud_base_path, api_port, proxy_token, ca_file)) { fprintf(stderr, "[RTC] initialization failed; check key and configuration\n"); return 1; }
 #endif
     pthread_t relay_thread;
     if (pthread_create(&relay_thread, NULL, websocket_worker, NULL) == 0) pthread_detach(relay_thread);

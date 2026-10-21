@@ -1,0 +1,20 @@
+[Unit]
+Description=SE9 authenticated TURN relay
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=turnserver
+Group=turnserver
+RuntimeDirectory=se9-turn
+ExecStart=/usr/bin/turnserver -c /etc/se9-turn/turnserver.conf --pidfile=/run/se9-turn/turnserver.pid --log-file=stdout --simple-log
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/se9-turn
+[Install]
+WantedBy=multi-user.target

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -155,6 +156,13 @@ func newRTCManagerFromEnv() (*rtcManager, error) {
 		if u := strings.TrimSpace(raw); u != "" {
 			if !strings.HasPrefix(u, "stun:") && !strings.HasPrefix(u, "turn:") && !strings.HasPrefix(u, "turns:") {
 				return nil, errors.New("invalid ICE URL")
+			}
+			if split := strings.IndexByte(u, '?'); split >= 0 {
+				query, parseErr := url.ParseQuery(u[split+1:])
+				transport := query.Get("transport")
+				if parseErr != nil || !strings.HasPrefix(u, "turn") || len(query) != 1 || len(query["transport"]) != 1 || (transport != "udp" && transport != "tcp") {
+					return nil, errors.New("invalid ICE transport: use turns:host:5349?transport=tcp for TURN TLS")
+				}
 			}
 			m.iceURLs = append(m.iceURLs, u)
 		}
@@ -419,6 +427,10 @@ func (c *cloud) rtcSessionRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.sessions[parts[0]] != s || s.Closed || time.Now().After(s.Expires) {
+		errorJSON(w, 404, "40402", "RTC session not found")
+		return
+	}
 	if r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "renew" {
 		s.Expires = time.Now().Add(rtcLeaseTTL)
 		s.Grant = m.signGrant(s, time.Now())
@@ -436,6 +448,8 @@ func (c *cloud) rtcSessionRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodDelete {
 		s.Closed = true
+		delete(m.sessions, s.ID)
+		c.closeRTCRelays(s.ID)
 		if p := m.devices[s.DeviceID]; p != nil {
 			p.enqueue(rtcEvent{Version: 1, Type: "session.close", SessionID: s.ID, NegotiationID: s.NegotiationID})
 		}
@@ -451,7 +465,14 @@ func (c *cloud) rtcSessionRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, "0", "success", m.sessionView(s, d))
 }
-func (p *rtcSignalPeer) close() { p.once.Do(func() { close(p.done); _ = p.ws.Close() }) }
+func (p *rtcSignalPeer) close() {
+	p.once.Do(func() {
+		close(p.done)
+		if p.ws != nil {
+			_ = p.ws.Close()
+		}
+	})
+}
 func (p *rtcSignalPeer) enqueue(event rtcEvent) bool {
 	select {
 	case <-p.done:
@@ -714,4 +735,31 @@ func (c *cloud) rtcRelayContext(sessionID string) (rtcEvent, bool, bool) {
 	token := content + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(m.key, []byte(content)))
 	payload, _ := json.Marshal(map[string]string{"context": token})
 	return rtcEvent{Version: 1, Type: "relay.attach", SessionID: s.ID, Payload: payload}, true, true
+}
+
+func (c *cloud) closeRTCRelays(rtcID string) {
+	c.mu.Lock()
+	var ids []string
+	for id, s := range c.sessions {
+		if s.RTCSessionID == rtcID {
+			ids = append(ids, id)
+			delete(c.sessions, id)
+		}
+	}
+	if len(ids) > 0 {
+		c.persistStateLocked()
+	}
+	c.mu.Unlock()
+	c.relayMu.Lock()
+	defer c.relayMu.Unlock()
+	for _, id := range ids {
+		if p := c.relayPairs[id]; p != nil {
+			if p.app != nil {
+				_ = p.app.Close()
+			}
+			if p.device != nil {
+				_ = p.device.Close()
+			}
+		}
+	}
 }
